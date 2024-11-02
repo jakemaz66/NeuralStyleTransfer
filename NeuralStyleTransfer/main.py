@@ -24,7 +24,7 @@ network_image_mean = torch.tensor([0.485, 0.456, 0.406])
 network_image_std = torch.tensor([0.229, 0.224, 0.225])
 
 #Setting the standard image size for content, style, and output images (larger sizes will take longer)
-image_size_global = 512
+image_size_global = 128
 
 
 def image_preprocess(image_name:str, image_size:int=image_size_global):
@@ -413,13 +413,13 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
 
 
 if __name__ == '__main__':
-    image_one_path = "Images\Surrealism.jpg"
-    image_two_path = "Images\CollegeHall.jpg"
+    image_one_path = "Images\picasso.jpg"
+    image_two_path = "Images\Pittsburgh.jpg"
     white_noise = "Images\WhiteNoise.jpg"
 
     style_img = image_preprocess(image_one_path)
     content_img = image_preprocess(image_two_path)
-    input_image = image_preprocess(white_noise)
+    input_image = content_img.clone()
 
     #Displaying images
     display_images(style_img, content_img)
@@ -428,7 +428,7 @@ if __name__ == '__main__':
     style_weight = 1000000
 
     output_image = neural_style_transfer_algorithm(convolutional_network, network_image_mean, network_image_std,
-                                                   content_img, style_img, input_image, num_steps=1000, content_weight=content_weight,
+                                                   content_img, style_img, input_image, num_steps=400, content_weight=content_weight,
                                                    style_weight=style_weight)
 
     plt.figure()

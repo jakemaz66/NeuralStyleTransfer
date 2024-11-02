@@ -1,0 +1,566 @@
+from PIL import Image
+from torchvision.models import vgg19, VGG19_Weights
+import torch
+import torch.nn as nn
+import torch.nn.functional as function
+import torch.optim as optim
+import matplotlib.pyplot as plt
+import torchvision.transforms as transforms
+
+
+def pillow_transform(image_one_path:str, image_two_path:str):
+    """Transforms an image path to a PIL image, then to a PyTorch tensor
+
+    Args:
+        image_one_path (str): Path to the first image
+        image_two_path (str): Path to the second image
+
+    Returns:
+        tensor: PyTorch tensor versions of the image
+    """
+    image_one = Image.open(image_one_path)
+    image_two = Image.open(image_two_path)
+
+    tensor_transform = transforms.ToTensor()
+
+    image_one = tensor_transform(image_one)
+    image_two = tensor_transform(image_two)
+
+    return image_one, image_two
+
+
+def resize(style_image, content_image, image_size):
+    """Resizes the two images to the same standard size (image_size x image_size)
+
+    Args:
+        style_image (Pytorch Tensor): The style image
+        content_image (Pytorch Tensor): The content image
+
+    Returns:
+        tensor: PyTorch tensor versions of the image resized to a square
+    """
+
+    transform = transforms.Resize((image_size, image_size))
+
+    style_image = transform(style_image) 
+    content_image = transform(content_image) 
+
+    return style_image, content_image
+
+def center_crop(style_image, content_image, crop_range=500):
+    """Crops the center of the image
+
+    Args:
+        style_image (Pytorch Tensor): The style image
+        content_image (Pytorch Tensor): The content image
+        crop_range (int, optional): The range from which to crop the image. Defaults to 500.
+
+    Returns:
+        tensor: PyTorch tensor versions of the image cropped
+    """
+
+    transform = transforms.CenterCrop(crop_range) 
+
+    style_image = transform(style_image) 
+    content_image = transform(content_image) 
+
+    return style_image, content_image
+
+
+def return_preprocessed_images(style_image_path, content_image_path, image_size, crop_range):
+    """Applies all the preprocessing transformations and returns the adjusted images
+
+    Args:
+        style_image (Pytorch Tensor): The style image
+        content_image (Pytorch Tensor): The content image
+        image_size (int): The size of the image, will be a square
+        crop_range (int): The range to crop the image
+
+    Returns:
+        tensor: PyTorch tensor versions of the images preprocessed for the network
+    """
+    style_image, content_image = pillow_transform(style_image_path, content_image_path)
+    if crop_range != 0:
+        style_image, content_image = center_crop(style_image, content_image, crop_range)
+    style_image, content_image = resize(style_image, content_image, image_size)
+
+    style_image = style_image.unsqueeze(0)
+    content_image = content_image.unsqueeze(0)
+
+    return style_image, content_image
+
+
+def display_images(style_image_path:str, content_image_path:str):
+    """Function to display the two images before processing
+
+    Args:
+        style_image_path (str): File path to the style image
+        content_image (str): File path to the content image
+    """
+    image_one = Image.open(style_image_path)
+    image_two = Image.open(content_image_path)
+
+    plt.title("Style Image before Preprocessing")
+    plt.imshow(image_one)
+    plt.pause(3)
+
+    plt.title("Content Image before Preprocessing")
+    plt.imshow(image_two)
+    plt.pause(3)
+
+
+class content_image_loss(nn.Module):
+    """Class to compute loss for the content of the image. It computes the distance between 
+       the feature maps of the output image and content image. Inherits from the nn.Module
+       class so we can insert it as a layer into the network.
+
+    Args:
+        nn (PyTorch): nn module from PyTorch
+    """
+    
+    def __init__(self, content_feature_maps,):
+
+        super(content_image_loss, self).__init__()
+
+        #Removing the target from the computational graph with detach()
+        self.content_feature_maps = content_feature_maps.detach()
+
+
+    def forward(self, current_feature_maps):
+        """Computes a mean square error loss between the two feature maps
+           of the content image and the current iteration of the input image
+
+        Args:
+            input (tensor): A tensor of the feature maps of the current input image
+
+        Returns:
+            input: The same tensor
+        """
+        self.loss = function.mse_loss(current_feature_maps, self.content_feature_maps)
+        
+        return current_feature_maps
+    
+
+class style_image_loss(nn.Module):
+    """Calculates loss for style, uses the gram matrix
+
+    Args:
+        nn (PyTorch): nn module
+    """
+    
+    def __init__(self, style_feature_maps):
+
+        super(style_image_loss, self).__init__()
+
+        #Target is the gram matrix of the features
+        self.style_feature_maps = compute_gram_matrix(style_feature_maps).detach()
+
+
+    def forward(self, current_feature_maps):
+        """Computes the mean square error loss of the output image's gram matrix of kernels and
+           the style images'
+
+        Args:
+            input (tensor): A tensor of feature maps, or kernels
+
+        Returns:
+            tensor: The same tensor
+        """
+        gram_matrix = compute_gram_matrix(current_feature_maps)
+
+        self.loss = function.mse_loss(gram_matrix, self.style_feature_maps)
+        
+        return current_feature_maps
+
+
+def compute_gram_matrix(input):
+    """Computes the gram matrix of an input image for the style computations
+
+    Args:
+        input (tensor): A PyTorch tensor representation of the image
+
+    Returns:
+        tensor: A returned gram matrix
+    """
+    #one is the batch dimension, which will be 1 (set with unsqueeze above), two is number of feature maps, 
+    #three X four is each feature map size
+    one, two, three, four = input.size()
+
+    #Features will be a feature_maps by feature_map_size tensor
+    features = input.view(two, three * four)
+
+    #Obtaining the gram matrix by multiplying features by its transpose
+    gram_product = torch.mm(features, features.T)
+
+    #Normalizing the gram matrix by dividing each element by the total number of elements in the matrix
+    #This is necessary as large feature map sizes (three * four) will lead to large gram matrix values. These will weight
+    #the early layers of the network more heavily (which we do not want)
+    final_gram = gram_product.div(two * three * four)
+
+    return final_gram 
+
+
+class normalize_images(nn.Module):
+    """Creating a normalization module so we can insert it into our network at the beginning, 
+       which will transform our images before they enter convolutional layers. Thus, we can
+       simply feed in images and they will automatically be processed appropriately
+
+    Args:
+        nn (PyTorch): nn module
+    """
+
+    def __init__(self, mean, std):
+        super(normalize_images, self).__init__()
+        
+        #Transforming the mean and standard deviation to a 3x1x1 tensor (for 3 channels in an image red, green, blue)
+        self.mean = torch.tensor(mean).view(-1, 1, 1)
+        self.standard_deviation = torch.tensor(std).view(-1, 1, 1)
+
+
+    def forward(self, image):
+        """Passing an image through the network outputs a normalized version of the image
+
+        Args:
+            image (tensor): A tensor representation of an image
+
+        Returns:
+            tensor: A normalized tensor
+        """
+
+        normalized_tensor = (image - self.mean) / self.standard_deviation
+
+        return normalized_tensor
+    
+
+def style_content_loss_layers(convolutional_network, network_mean, network_std, 
+                              image_one, image_two):
+    """Creates the model layers for computing the style and content losses.
+
+    Args:
+        convolutional_network (PyTorch network): Pre-trained convolutional network (e.g., VGG-19).
+        network_mean (tensor): Normalization mean for the images.
+        network_std (tensor): Normalization standard deviation for the images.
+        image_one (tensor): The content image.
+        image_two (tensor): The style image.
+
+    Returns:
+        nn.Sequential: A modified network model with content and style loss layers added.
+        list: List of content losses.
+        list: List of style losses.
+    """
+
+    #The content layers are higher level, abstract features, so we take the 4th convolutional layer of the VGG-19 network
+    content_layers_default = set(["('7', Conv2d(128, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)))"])
+
+    #The style layers are given in multiple layers, as style features can be high or low level
+    style_layers_default = set(["('0', Conv2d(3, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)))",
+                             "('2', Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)))", 
+                            "('5', Conv2d(64, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)))", 
+                            "('7', Conv2d(128, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)))", 
+                            "('9', MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False))"])
+    
+    #Creating normalization module and initializing the model with a normalization layer
+    normalization = normalize_images(network_mean, network_std)
+    model = nn.Sequential(normalization)
+
+    content_loss_list = []
+    style_loss_list = []
+
+    #Iterate through each layer of the convolutional network
+    for layer in convolutional_network.named_children():
+
+        #If it's a 2D convolutional layer
+        if isinstance(layer[-1], nn.Conv2d):
+            name = str(layer)
+
+        #If it's an activation ReLU layer
+        elif isinstance(layer[-1], nn.ReLU):
+            name = str(layer)
+
+            # ReLU layers require `inplace=False` for loss layers to work correctly
+            layer = nn.ReLU(inplace=False)
+
+        #If it's a pooling layer
+        elif isinstance(layer[-1], nn.MaxPool2d):
+            name = str(layer)
+
+        #If it's a batch normalization layer
+        elif isinstance(layer[-1], nn.BatchNorm2d):
+            name = str(layer)
+
+        #Adding the current layer to the model with the appropriate name
+        if type(layer) == tuple:
+            if isinstance(layer[-1], nn.Conv2d):
+                layer_add = layer[-1]
+        else:
+            layer_add = layer
+
+        model.add_module(name, layer_add)
+
+        #Add content loss after the specified content layers
+        if name in content_layers_default:
+
+            #The feature maps of the content image we want to match
+            content_target_filters = model(image_one).detach()
+
+            #Create the content loss layer
+            content_loss = content_image_loss(content_target_filters)
+
+            #Adding content loss layer to the model
+            model.add_module(f'content_loss_{layer[0]}', content_loss)
+
+            #Append the content loss to the list
+            content_loss_list.append(content_loss)
+
+        #Add style loss after the specified style layers
+        if name in style_layers_default:
+            #The feature maps of the style image, using the Gram matrix
+            style_target_filters = model(image_two).detach()
+
+            #Create the style loss layer
+            style_loss = style_image_loss(style_target_filters)
+
+            #Adding style loss layer to the model
+            model.add_module(f'style_loss_{layer[0]}', style_loss)
+
+            #Append the style loss to the list
+            style_loss_list.append(style_loss)
+
+    #Trim layers that come after the last loss layer (content or style)
+    last_loss_layer = max(
+    (i for i, layer in enumerate(model) if isinstance(layer, content_image_loss) \
+     or isinstance(layer, style_image_loss)),
+
+    default = -42
+)
+    #Trim layers that come after the last loss layer
+    model = model[:last_loss_layer + 1]
+
+    return model, content_loss_list, style_loss_list
+
+
+def get_input_image_optimizer(input_image:torch.tensor):
+    """Limited Memory BFGS is an optimization algorithm. Computes the gradient of the loss function
+       and asjusts the parameters (pixel values in this case) in the direction of steepest descent
+       of the loss function.
+
+    Args:
+        input_image (torch.tensor): The input image as a tensor
+
+    Returns:
+        optimizer: The appropriate optimizer
+    """
+    optm = optim.LBFGS([input_image])
+
+    return optm
+
+
+def get_manual_input_image_optimizer(input_image:torch.tensor, lr):
+    """Limited Memory BFGS is an optimization algorithm. Computes the gradient of the loss function
+       and asjusts the parameters (pixel values in this case) in the direction of steepest descent
+       of the loss function.
+
+    Args:
+        input_image (torch.tensor): The input image as a tensor
+
+    Returns:
+        optimizer: The appropriate optimizer
+    """
+    optm = ManualLBFGS([input_image], lr=lr)
+
+    return optm
+
+
+class ManualLBFGS:
+    def __init__(self, params, lr=1, history_size=10):
+        self.params = params
+        self.lr = lr
+        self.history_size = history_size
+        self.s_list = []
+        self.y_list = []
+        self.rho_list = []
+        self.prev_params = None
+        self.prev_grad = None
+
+    def step(self, closure):
+
+        # Compute loss and gradients
+        loss = closure()
+        
+        # Retrieve the current gradients and parameters
+        grad = self._get_flat_grad()
+        current_params = self._get_flat_params()
+
+        if self.prev_grad is not None:
+            s = current_params - self.prev_params
+            y = grad - self.prev_grad
+            rho = 1.0 / (y.dot(s) + 1e-10)
+
+            if len(self.s_list) >= self.history_size:
+                self.s_list.pop(0)
+                self.y_list.pop(0)
+                self.rho_list.pop(0)
+
+            self.s_list.append(s)
+            self.y_list.append(y)
+            self.rho_list.append(rho)
+            direction = self._two_loop_recursion(grad)
+        else:
+            direction = -grad  # Use gradient descent for the first step
+
+        # Update parameters
+        with torch.no_grad():
+            for param in self.params:
+                param.add_(direction.view(param.size()), alpha=self.lr)
+
+        # Store current params and grads for next step
+        self.prev_params = current_params.clone()
+        self.prev_grad = grad.clone()
+
+        return loss
+
+    def zero_grad(self):
+        for param in self.params:
+            if param.grad is not None:
+                param.grad.detach_()
+                param.grad.zero_()
+
+    def _get_flat_params(self):
+        return torch.cat([param.view(-1) for param in self.params])
+
+    def _get_flat_grad(self):
+        return torch.cat([param.grad.view(-1) for param in self.params])
+
+    def _two_loop_recursion(self, grad):
+        q = grad.clone()
+        alpha = []
+
+        for i in range(len(self.s_list) - 1, -1, -1):
+            s, y, rho = self.s_list[i], self.y_list[i], self.rho_list[i]
+            alpha_i = rho * s.dot(q)
+            alpha.append(alpha_i)
+            q -= alpha_i * y
+
+        r = q
+
+        for i in range(len(self.s_list)):
+            s, y, rho = self.s_list[i], self.y_list[i], self.rho_list[i]
+            beta = rho * y.dot(r)
+            r += s * (alpha[i] - beta)
+
+        return -r  # Return the negative direction for minimization
+
+
+def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
+                       content_image, style_image, input_image, num_steps=300,
+                       style_weight=1000000, content_weight=1):
+    """Runs the neural style transfer algorithm
+
+    Args:
+        cnn (PyTorch network): A convolutional neural network. We use the pre-trained vgg-19.
+        normalizpation_mean (tensor): A tensor of values to normalize the image's channels
+        normalization_std (tensor): A tensor of values to normalize the image's channels
+        content_img (tensor): The content image (converted to a tensor)
+        style_img (tensor): The style image (converted to a tensor)
+        input_img (tensor): The input image (white noise which will get altered through gradient-descent losses)
+        num_steps (int, optional): The number of steps to compute the losses. Defaults to 300.
+        style_weight (int, optional): The weighting parameter to give to the style image. Defaults to 1000000.
+        content_weight (int, optional): The weighting parameter to give to the content image. Defaults to 1.
+
+    Returns:
+        tensor: An ouput image that is a blend of the style and content images
+    """
+
+
+    print('Constructing the model...')
+
+    #Retrieving the baseline losses
+    model, content_losses, style_losses = style_content_loss_layers(cnn, normalization_mean, normalization_std,
+                               content_image, style_image
+    )
+
+    input_image.requires_grad_(True)
+    model.eval()
+    model.requires_grad_(False)
+
+    #Getting the optimizer to adjust pixel values for the input image
+    optimizer = get_manual_input_image_optimizer(input_image, lr=0.0001)
+
+    print('Optimizing the input image to blend the content and style..')
+
+    #Define run as an array due to Python scope. Arrays are mutable, whereas integers are not, within the 
+    #inner function 'optimize'
+    run = [0]
+
+    while run[0] <= num_steps:
+        def closure():
+            input_image.data.clamp_(0, 1)
+            optimizer.zero_grad()
+            model(input_image)
+            style_score = sum(sl.loss for sl in style_losses) * style_weight
+            content_score = sum(cl.loss for cl in content_losses) * content_weight
+            total_loss = style_score + content_score
+            total_loss.backward()
+            run[0] += 1
+            if run[0] % 20 == 0:
+                print(f"Step {run[0]}: Style Loss: {style_score.item():.4f}, Content Loss: {content_score.item():.4f}")
+            return total_loss
+
+        optimizer.step(closure)
+
+    #Ensuring final image has valid pixel values between 0 and 1
+    with torch.no_grad():
+        input_image.clamp_(0, 1)
+
+    return input_image
+
+
+if __name__ == '__main__':
+
+    #Set to eval because layers differ in behavior during evaluation and training
+    #VGG19 is split into two components: 'features' and 'classifier'. Features contains the 
+    #convolutional and pooling layers, which is what we want for neural-style transfer. Also,
+    #we are not altering the model's default weights so we set the mode to eval()
+    convolutional_network = vgg19(weights=VGG19_Weights.DEFAULT).features.eval()
+
+    #Normalizing images based on the vgg19 network. The vgg19 network is trained on images
+    #with channels normalized by the following values
+    network_image_mean = torch.tensor([0.485, 0.456, 0.406])
+    network_image_std = torch.tensor([0.229, 0.224, 0.225])
+
+    #Setting the standard image size for content, style, and output images (larger sizes will take longer)
+    image_size_global = 128
+    image_one_path = "Images\picasso.jpg"
+    image_two_path = "Images\Pittsburgh.jpg"
+    white_noise = "Images\WhiteNoise.jpg"
+
+    #Displaying images
+    display_images(style_image_path=image_one_path, content_image_path=image_two_path)
+
+    style_image, content_image = return_preprocessed_images(style_image_path=image_one_path, content_image_path=image_two_path,
+                                                            image_size=image_size_global, crop_range=0)
+    input_image = content_image.clone()
+
+    content_weight = 1
+    style_weight = 1000000
+
+    output_image = neural_style_transfer_algorithm(convolutional_network, network_image_mean, network_image_std,
+                                                   content_image, style_image, input_image, num_steps=200, content_weight=content_weight,
+                                                   style_weight=style_weight)
+
+    plt.figure()
+    plt.title(f"Ouput with Content Weight: {content_weight} and Style Weight: {style_weight}")
+
+    #Reformatting output image
+    output_image = output_image.squeeze(0).detach().numpy()  
+    output_image = output_image.transpose(1, 2, 0)  
+    plt.imshow(output_image)
+    plt.pause(100)
+
+
+
+
+
+
+
+
