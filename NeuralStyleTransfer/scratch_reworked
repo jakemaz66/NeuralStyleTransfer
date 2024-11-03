@@ -355,7 +355,7 @@ def get_input_image_optimizer(input_image:torch.tensor):
     return optm
 
 
-def get_manual_input_image_optimizer(input_image:torch.tensor, lr):
+def get_manual_input_image_optimizer(input_image:torch.tensor, learning_rate):
     """Limited Memory BFGS is an optimization algorithm. Computes the gradient of the loss function
        and asjusts the parameters (pixel values in this case) in the direction of steepest descent
        of the loss function.
@@ -366,89 +366,154 @@ def get_manual_input_image_optimizer(input_image:torch.tensor, lr):
     Returns:
         optimizer: The appropriate optimizer
     """
-    optm = ManualLBFGS([input_image], lr=lr)
+    optm = ManualLBFGS([input_image], learning_rate=learning_rate)
 
     return optm
 
 
 class ManualLBFGS:
-    def __init__(self, params, lr=1, history_size=10):
+    """A Manual implementation of the LBFGS Algorithm. LBFGS approximates the second-derivative matrix
+       for better convergence compared to vanilla gradient descent optimization. The 'curvature' 
+       information gained allows the algorithm to take larger optimization steps in flatter 
+       regions and smaller steps in steep regions. L stands for limited memory, as the algorithm
+       approximates the derivates using the past n updates.
+    """
+
+    def __init__(self, params, learning_rate=1, history_size=20):
+        """Initializing optimizer class
+
+        Args:
+            params (vary): The thing to be optimized (input image)
+            learning_rate (int, optional): The step size in gradient descent. Defaults to 1.
+            history_size (int, optional): _description_. Defaults to 10.
+        """
         self.params = params
-        self.lr = lr
+
         self.history_size = history_size
-        self.s_list = []
-        self.y_list = []
-        self.rho_list = []
+
+        self.parameter_differences = []
+        self.gradient_differences = []
+        self.scaling = []
+
+        self.learning_rate= learning_rate
+
         self.prev_params = None
         self.prev_grad = None
 
+
     def step(self, closure):
 
-        # Compute loss and gradients
-        loss = closure()
+        #Get the loss (which also calculates gradients because closure() calls backward())
+        loss_at_step = closure()
         
-        # Retrieve the current gradients and parameters
-        grad = self._get_flat_grad()
-        current_params = self._get_flat_params()
+        #Retrieve the current gradients and parameters
+        gradients = self._get_flat_grad()
+        parameters = self._get_flat_params()
 
+        #If we aren't the first step
         if self.prev_grad is not None:
-            s = current_params - self.prev_params
-            y = grad - self.prev_grad
-            rho = 1.0 / (y.dot(s) + 1e-10)
+            
+            #Find the difference in the previous params and gradients. When differences are larger
+            #Slope of loss function is also greater
+            diff_param = parameters - self.prev_params
+            diff_grad = gradients - self.prev_grad
 
-            if len(self.s_list) >= self.history_size:
-                self.s_list.pop(0)
-                self.y_list.pop(0)
-                self.rho_list.pop(0)
+            scaling_step = 1.0 / (diff_grad.dot(diff_param) + 0.00000001)
 
-            self.s_list.append(s)
-            self.y_list.append(y)
-            self.rho_list.append(rho)
-            direction = self._two_loop_recursion(grad)
+            #If we reached the max history size, pop an element
+            if len(self.parameter_differences) >= self.history_size:
+
+                self.parameter_differences.pop(0)
+                self.gradient_differences.pop(0)
+                self.scaling.pop(0)
+
+            self.parameter_differences.append(diff_param)
+            self.gradient_differences.append(diff_grad)
+            self.scaling.append(scaling_step)
+
+            direction = self._two_loop_recursion(gradients)
         else:
-            direction = -grad  # Use gradient descent for the first step
 
-        # Update parameters
+            #Gradient descent is used when we have no previous parameters
+            direction = -gradients  
+
+        #Updating pixel values of input image in the direction that minimizes loss
         with torch.no_grad():
-            for param in self.params:
-                param.add_(direction.view(param.size()), alpha=self.lr)
 
-        # Store current params and grads for next step
-        self.prev_params = current_params.clone()
-        self.prev_grad = grad.clone()
+            for parameter in self.params:
+                
+                #Updating each parameter in-place using add_ in the direction of direction scaled by learning rate
+                parameter.add_(direction.view(parameter.size()), 
+                               alpha=self.learning_rate)
 
-        return loss
+        #Store current params and grads for next step
+        self.prev_params = parameters.clone()
+        self.prev_grad = gradients.clone()
+
+        return loss_at_step
+
 
     def zero_grad(self):
-        for param in self.params:
-            if param.grad is not None:
-                param.grad.detach_()
-                param.grad.zero_()
+        """Zeroes the gradients at each optimization step
+        """
+
+        for parameter in self.params:
+
+            if parameter.grad is not None:
+
+                parameter.grad.detach_()
+                parameter.grad.zero_()
+
 
     def _get_flat_params(self):
-        return torch.cat([param.view(-1) for param in self.params])
+        listed = []
+        for parameter in self.params:
+            listed.append(parameter.view(-1))
+
+        cat = torch.cat(listed)
+        return cat
 
     def _get_flat_grad(self):
-        return torch.cat([param.grad.view(-1) for param in self.params])
+        listed = []
+        for parameter in self.params:
+            listed.append(parameter.grad.view(-1))
 
-    def _two_loop_recursion(self, grad):
-        q = grad.clone()
-        alpha = []
+        cat = torch.cat(listed)
+        return cat
 
-        for i in range(len(self.s_list) - 1, -1, -1):
-            s, y, rho = self.s_list[i], self.y_list[i], self.rho_list[i]
-            alpha_i = rho * s.dot(q)
-            alpha.append(alpha_i)
-            q -= alpha_i * y
+    def _two_loop_recursion(self, gradients):
+        final_grads = gradients.clone()
+        scaling_factors = []
 
-        r = q
+        #Going backwards through the history of updates
+        for i in range(len(self.parameter_differences) - 1, -1, -1):
 
-        for i in range(len(self.s_list)):
-            s, y, rho = self.s_list[i], self.y_list[i], self.rho_list[i]
-            beta = rho * y.dot(r)
-            r += s * (alpha[i] - beta)
+            param_diff = self.parameter_differences[i]
+            grad_diff = self.gradient_differences[i]
+            scaling = self.scaling[i]
 
-        return -r  # Return the negative direction for minimization
+            scaling_i = scaling * param_diff.dot(final_grads)
+            scaling_factors.append(scaling_i)
+
+            #Adjusting the final grads
+            final_grads -= scaling_i * grad_diff
+
+        intermediate = final_grads
+
+        #Forward pass through the history of our parameter differences
+        for i in range(len(self.parameter_differences)):
+
+            param_diff = self.parameter_differences[i]
+            grad_diff = self.gradient_differences[i]
+            scaling = self.scaling[i]
+
+            beta = scaling * grad_diff.dot(intermediate)
+
+            intermediate += param_diff * (scaling_factors[i] - beta)
+
+        #Return the negative direction for minimization
+        updated_gradient = -intermediate
+        return updated_gradient
 
 
 def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
@@ -484,7 +549,7 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
     model.requires_grad_(False)
 
     #Getting the optimizer to adjust pixel values for the input image
-    optimizer = get_manual_input_image_optimizer(input_image, lr=0.0001)
+    optimizer = get_manual_input_image_optimizer(input_image, learning_rate=0.0001)
 
     print('Optimizing the input image to blend the content and style..')
 
@@ -494,22 +559,34 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
 
     while run[0] <= num_steps:
         def closure():
+            #Ensure pixel values are between 0 and 1
             input_image.data.clamp_(0, 1)
+
             optimizer.zero_grad()
+
             model(input_image)
-            style_score = sum(sl.loss for sl in style_losses) * style_weight
-            content_score = sum(cl.loss for cl in content_losses) * content_weight
+
+            #Applying weight to sum of losses. Content has only one loss (one layer)
+            style_score = sum(loss_style.loss for loss_style in style_losses) * style_weight
+            content_score = content_losses[0].loss * content_weight
+
             total_loss = style_score + content_score
             total_loss.backward()
+
             run[0] += 1
+
             if run[0] % 20 == 0:
-                print(f"Step {run[0]}: Style Loss: {style_score.item():.4f}, Content Loss: {content_score.item():.4f}")
+
+                print(f"Step {run[0]}: Style Loss: \
+                      {style_score.item():.4f}, Content Loss: {content_score.item():.4f}")
+                
             return total_loss
 
         optimizer.step(closure)
 
     #Ensuring final image has valid pixel values between 0 and 1
     with torch.no_grad():
+        
         input_image.clamp_(0, 1)
 
     return input_image
@@ -545,7 +622,7 @@ if __name__ == '__main__':
     style_weight = 1000000
 
     output_image = neural_style_transfer_algorithm(convolutional_network, network_image_mean, network_image_std,
-                                                   content_image, style_image, input_image, num_steps=200, content_weight=content_weight,
+                                                   content_image, style_image, input_image, num_steps=1000, content_weight=content_weight,
                                                    style_weight=style_weight)
 
     plt.figure()
