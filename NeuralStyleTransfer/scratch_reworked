@@ -608,15 +608,16 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
     model.requires_grad_(False)
 
     #Getting the optimizer to adjust pixel values for the input image
-    optimizer = get_manual_input_image_optimizer(input_image, learning_rate=0.0001)
+    #optimizer = get_manual_input_image_optimizer(input_image, learning_rate=0.0001)
+    optimizer = get_input_image_optimizer(input_image)
 
     print('Optimizing the input image to blend the content and style..')
 
     #Define run as an array due to Python scope. Arrays are mutable, whereas integers are not, within the 
     #inner function 'optimize'
-    run = [0]
+    num_steps_array = [0]
 
-    while run[0] <= num_steps:
+    while num_steps_array[0] <= num_steps:
 
         def closure():
             """The function that returns the loss for the optimizer
@@ -642,11 +643,11 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
             #Computing gradients of parameters
             total_loss.backward()
 
-            run[0] += 1
+            num_steps_array[0] += 1
 
-            if run[0] % 20 == 0:
+            if num_steps_array[0] % 20 == 0:
 
-                print(f"Step {run[0]}: Style Loss: \
+                print(f"Step {num_steps_array[0]}: Style Loss: \
                       {style_score.item():.4f}, Content Loss: {content_score.item():.4f}")
                 
             return total_loss
@@ -675,9 +676,9 @@ if __name__ == '__main__':
     network_image_std = torch.tensor([0.229, 0.224, 0.225])
 
     #Setting the standard image size for content, style, and output images (larger sizes will take longer)
-    image_size_global = 128
-    image_one_path = "Images\picasso.jpg"
-    image_two_path = "Images\Pittsburgh.jpg"
+    image_size_global = 512
+    image_one_path = "Images\MonaLisa.jfif"
+    image_two_path = "Images\Acrisure.jfif"
     white_noise = "Images\WhiteNoise.jpg"
 
     #Displaying images
@@ -691,7 +692,7 @@ if __name__ == '__main__':
     style_weight = 1000000
 
     output_image = neural_style_transfer_algorithm(convolutional_network, network_image_mean, network_image_std,
-                                                   content_image, style_image, input_image, num_steps=1, content_weight=content_weight,
+                                                   content_image, style_image, input_image, num_steps=360, content_weight=content_weight,
                                                    style_weight=style_weight)
 
     plt.figure()
