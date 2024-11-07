@@ -609,8 +609,7 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
     model.requires_grad_(False)
 
     #Getting the optimizer to adjust pixel values for the input image
-    #optimizer = get_manual_input_image_optimizer(input_image, learning_rate=0.0001)
-    optimizer = get_input_image_optimizer(input_image)
+    optimizer = get_manual_input_image_optimizer(input_image, learning_rate=0.0001)
 
     print('Optimizing the input image to blend the content and style..')
 
