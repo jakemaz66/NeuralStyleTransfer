@@ -67,8 +67,9 @@ class style_image_loss(nn.Module):
         Returns:
             tensor: The same tensor
         """
-        gram_matrix = compute_gram_matrix(current_feature_maps)
 
+        #Computing gram matrix of current feature maps and getting mse loss
+        gram_matrix = compute_gram_matrix(current_feature_maps)
         self.loss = function.mse_loss(gram_matrix, self.style_feature_maps)
         
         return current_feature_maps
@@ -84,6 +85,7 @@ class normalize_images(nn.Module):
     """
 
     def __init__(self, mean, std):
+        #Calling parent constructor from nn.Module
         super(normalize_images, self).__init__()
         
         #Transforming the mean and standard deviation to a 3x1x1 tensor (for 3 channels in an image red, green, blue)
@@ -340,14 +342,14 @@ def style_content_loss_layers(convolutional_network, network_mean, network_std,
             style_loss_list.append(style_loss)
 
     #Trim layers that come after the last loss layer (content or style). The standard VGG-19 network has more layers
-    #than what we want
+    #than what we want so we get the max index of a loss layer
     last_loss_layer = max(
     (i for i, layer in enumerate(model) if isinstance(layer, content_image_loss) \
      or isinstance(layer, style_image_loss)),
 
     default = -42
 )
-    #Trim layers that come after the last loss layer
+    #Trim layers that come after the last loss layer through indexing
     model = model[:last_loss_layer + 1]
 
     return model, content_loss_list, style_loss_list
@@ -420,18 +422,19 @@ class ManualLBFGS:
         self.prev_grad = None
 
 
-    def step(self, closure):
-        """This is the "step" in minimizing the loss, adjusting the pixel values of the input image
+    def step(self, optimize):
+        """This is the "step" in minimizing the loss, adjusting the pixel values of the input image.
+           We adjust in the opposite direction of gradient of loss.
 
         Args:
-            closure (function): A function that returns the loss
+            optimize (function): A function that returns the loss
 
         Returns:
             float: The loss
         """
 
-        #Get the loss (which also calculates gradients because closure() calls loss.backward())
-        loss_at_step = closure()
+        #Get the loss (which also calculates gradients because optimize() calls loss.backward())
+        loss_at_step = optimize()
         
         #Retrieve the current gradients and parameters
         gradients = self._get_flat_grad()
@@ -508,6 +511,7 @@ class ManualLBFGS:
 
         cat = torch.cat(listed)
         return cat
+
 
     def _get_flat_grad(self):
         """Flattens gradients into a 1-D Vector
@@ -595,9 +599,6 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
         tensor: An ouput image that is a blend of the style and content images
     """
 
-
-    print('Constructing the model...')
-
     #Retrieving the baseline losses
     model, content_losses, style_losses = style_content_loss_layers(cnn, normalization_mean, normalization_std,
                                content_image, style_image
@@ -619,7 +620,7 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
 
     while num_steps_array[0] <= num_steps:
 
-        def closure():
+        def optimize():
             """The function that returns the loss for the optimizer
 
             Returns:
@@ -634,16 +635,20 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
             model(input_image)
 
             #Applying weight to sum of losses. Content has only one loss (one layer)
-            style_score = sum(loss_style.loss for loss_style in style_losses) * style_weight
-            content_score = content_losses[0].loss * content_weight
+            style_score = sum(loss_style.loss for loss_style in style_losses)
+            style_weighted = style_score * style_weight
+            content_score = content_losses[0].loss 
+            content_weighted = content_score* content_weight
 
             #Total loss is the weighted sum
-            total_loss = style_score + content_score
+            total_loss = style_weighted + content_weighted
 
             #Computing gradients of parameters
             total_loss.backward()
 
+            #Increment the step
             num_steps_array[0] += 1
+
 
             if num_steps_array[0] % 20 == 0:
 
@@ -652,7 +657,7 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
                 
             return total_loss
 
-        optimizer.step(closure)
+        optimizer.step(optimize)
 
     #Ensuring final image has valid pixel values between 0 and 1
     with torch.no_grad():
@@ -698,7 +703,7 @@ if __name__ == '__main__':
     plt.figure()
     plt.title(f"Ouput with Content Weight: {content_weight} and Style Weight: {style_weight}")
 
-    #Reformatting output image
+    #Reformatting output image for display (image is in PyTorch format, we re-adjust and get rid of batch dimension)
     output_image = output_image.squeeze(0).detach().numpy()  
     output_image = output_image.transpose(1, 2, 0)  
     plt.imshow(output_image)
