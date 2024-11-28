@@ -173,7 +173,7 @@ class ManualLBFGS:
             #Scaling (add small number to prevent divide by 0)
             scaling_step = 1.0 / (diff_grad.dot(diff_param) + 0.00000001)
 
-            #If we reached the max history size, pop an element
+            #If we reached the max history size, pop an element to make room for previous iteration
             if len(self.parameter_differences) >= self.history_size:
 
                 self.parameter_differences.pop(0)
@@ -228,6 +228,7 @@ class ManualLBFGS:
             pyTorch: Tensor
         """
         listed = []
+
         for parameter in self.params:
             listed.append(parameter.view(-1))
 
@@ -242,6 +243,7 @@ class ManualLBFGS:
             pyTorch: Tensor
         """
         listed = []
+
         for parameter in self.params:
             listed.append(parameter.grad.view(-1))
 
@@ -274,12 +276,13 @@ class ManualLBFGS:
             scaling = self.scaling[i]
 
             #Get scaling factor
-            scaling_factor_backward = scaling * param_diff.dot(final_grads)
+            scaling_factor_backward = (scaling * param_diff.dot(final_grads))
             scaling_factors.append(scaling_factor_backward)
 
             #Adjusting the final grads by subtracting scaling factors
-            final_grads -= scaling_factor_backward * grad_diff
+            final_grads -= (scaling_factor_backward * grad_diff)
 
+        #The intermediate grads after backward history pass
         intermediate = final_grads
 
         #Forward pass through the history of our parameter differences
@@ -290,7 +293,7 @@ class ManualLBFGS:
             grad_diff = self.gradient_differences[i]
             scaling = self.scaling[i]
 
-            scaling_factor_forward = scaling * grad_diff.dot(intermediate)
+            scaling_factor_forward = (scaling * grad_diff.dot(intermediate))
 
             #Adding differences between parameter differences and difference of scaling factors
             intermediate += param_diff * (scaling_factors[i] - scaling_factor_forward)
@@ -339,6 +342,7 @@ def resize(style_image, content_image, image_size):
     content_image = transform(content_image) 
 
     return style_image, content_image
+
 
 def sharpen(style_image, content_image, image_sharpness=1.05):
     """Sharpen the image for better results after transfer
@@ -453,6 +457,7 @@ def compute_gram_matrix(input):
 
     return final_gram 
 
+
 def trim_layers(convolutional_network):
     """Trim the excess layers of the VGG19 model by iterating through and finding the maximum index (last)
        loss layer
@@ -513,24 +518,13 @@ def style_content_loss_layers(convolutional_network, network_mean, network_std,
     #Iterate through each layer of the convolutional network
     for layer in convolutional_network.named_children():
 
-        #If it's a 2D convolutional layer
-        if isinstance(layer[-1], nn.Conv2d):
+        layer_type = type(layer[-1])
+        if layer_type in (nn.Conv2d, nn.ReLU, nn.MaxPool2d, nn.BatchNorm2d):
             name = str(layer)
 
-        #If it's an activation ReLU layer
-        elif isinstance(layer[-1], nn.ReLU):
-            name = str(layer)
-
-            #Directly modifying input to save on memory
-            layer = nn.ReLU(inplace=False)
-
-        #If it's a pooling layer
-        elif isinstance(layer[-1], nn.MaxPool2d):
-            name = str(layer)
-
-        #If it's a batch normalization layer
-        elif isinstance(layer[-1], nn.BatchNorm2d):
-            name = str(layer)
+            #inplace ReLU recommended for neural style transfer
+            if layer_type == nn.ReLU:
+                layer = nn.ReLU(inplace=False)
 
         #Adding the current layer to the model with the appropriate name
         if type(layer) == tuple:
@@ -635,10 +629,10 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
                                content_image, style_image
     )
 
-    #Input image needs grad to compute loss and adjust pixels
+    #Input image needs grad to compute loss and adjust pixel values
     input_image.requires_grad_(True)
 
-    #We are not updating model weights
+    #We are not updating model weights so we set to eval() 
     model.eval()
     model.requires_grad_(False)
 
@@ -671,13 +665,15 @@ def neural_style_transfer_algorithm(cnn, normalization_mean, normalization_std,
 
             for sl in style_losses:
                 style += sl.loss
-            for cl in content_losses:
-                content += cl.loss
-
             style = style * style_weight
-            content = content_weight * content
 
+            #Only one layer used in content loss
+            content = content_weight * content_losses[0].loss
+
+            #total loss is the weighted sum of the two separate losses
             total_loss = style + content
+
+            #Computing all the gradients with backward()
             total_loss.backward()
 
             #Increment the step
@@ -727,9 +723,11 @@ if __name__ == '__main__':
                                                             image_size=image_size_global, crop_range=0)
     input_image = content_image.clone()
 
+    #Setting the weights for the loss
     content_weight = 1
     style_weight = 1000000
 
+    #Obtaining output image
     output_image = neural_style_transfer_algorithm(convolutional_network, network_image_mean, network_image_std,
                                                    content_image, style_image, input_image, num_steps=360, content_weight=content_weight,
                                                    style_weight=style_weight)
@@ -737,7 +735,7 @@ if __name__ == '__main__':
     plt.figure()
     plt.title(f"Ouput with Content Weight: {content_weight} and Style Weight: {style_weight}")
 
-    #Reformatting output image for display (image is in PyTorch format, we re-adjust and get rid of batch dimension)
+    #Reformatting output image for display (image is in PyTorch format, we re-adjust channels and get rid of batch dimension)
     output_image = output_image.squeeze(0).detach().numpy()  
     output_image = output_image.transpose(1, 2, 0)  
     plt.imshow(output_image)
